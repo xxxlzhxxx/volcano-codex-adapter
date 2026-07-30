@@ -9,8 +9,9 @@ for Codex-style `User-Agent` routing.
 - `switch_to_ark.sh`: detects project type and applies Ark model settings.
 - `smoke_test_ark_responses.sh`: sends Codex-compatible Responses API test
   requests to Ark.
-- `observer/proxy.js`: local Responses API proxy with token, cache, latency,
+- `observer/proxy.py`: local Responses API proxy with token, cache, latency,
   tool-call, and raw SSE logging plus a browser dashboard.
+- `observer/proxy.js`: optional Node.js implementation of the same observer.
 - `tests/run_tests.sh`: local shell tests for apply, status, rollback, and
   dry-run behavior.
 - `tests/run_codex_surface_tests.sh`: local shell tests for Codex CLI,
@@ -60,7 +61,7 @@ Start a local model-provider proxy:
 ```bash
 cd /path/to/volcano-codex-adapter
 export ARK_API_KEY="..."
-node observer/proxy.js
+python3 observer/proxy.py
 ```
 
 Open the dashboard:
@@ -115,6 +116,10 @@ export OBSERVER_FILTER_REASONING_SUMMARY=1
 SSE events before forwarding them to Codex. This is useful for debugging Ark
 compatibility issues where Codex rejects unexpected reasoning-summary event
 ordering.
+
+The observer default runtime is Python 3 with standard-library modules only. No
+`pip install`, Node.js, or npm dependencies are required. The Node.js
+implementation is kept as an optional fallback.
 
 For Node, Python, and unknown projects, the script writes OpenAI-compatible
 variables to `.env`:

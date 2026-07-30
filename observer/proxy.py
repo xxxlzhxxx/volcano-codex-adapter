@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""Volcano Codex Observer.
+
+Zero-dependency Responses API proxy and dashboard server.
+"""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import re
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+
+HOST = os.environ.get("OBSERVER_HOST", "127.0.0.1")
+PORT = int(os.environ.get("OBSERVER_PORT", "17860"))
+UPSTREAM_BASE = os.environ.get(
+    "ARK_UPSTREAM_BASE", "https://ark.cn-beijing.volces.com/api/v3"
+).rstrip("/")
+LOG_DIR = Path(os.environ.get("OBSERVER_LOG_DIR", Path.cwd() / ".ark-observer")).resolve()
+STATIC_DIR = Path(__file__).resolve().parent / "public"
+FILTER_REASONING_SUMMARY = os.environ.get("OBSERVER_FILTER_REASONING_SUMMARY") == "1"
+MAX_BODY_BYTES = int(os.environ.get("OBSERVER_MAX_BODY_BYTES", str(25 * 1024 * 1024)))
+REQUESTS_DIR = LOG_DIR / "requests"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def ensure_dirs() -> None:
+    REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def safe_file_name(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)
+
+
+def request_prefix(request_id: str) -> Path:
+    return REQUESTS_DIR / safe_file_name(request_id)
+
+
+def read_json_if_exists(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def parse_json_maybe(value: str | bytes) -> Any | None:
+    try:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        return json.loads(value)
+    except Exception:
+        return None
+
+
+def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for key, value in headers.items():
+        if re.search(r"authorization|api[-_]key|token|cookie", key, re.I):
+            redacted[key] = "<redacted>"
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def parse_sse_block(block: str) -> tuple[str, str]:
+    event = ""
+    data: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("event:"):
+            event = line[6:].strip()
+        elif line.startswith("data:"):
+            data.append(line[5:].lstrip())
+    return event, "\n".join(data)
+
+
+def format_sse_block(event: str, data: str) -> bytes:
+    lines: list[str] = []
+    if event:
+        lines.append(f"event: {event}")
+    if data:
+        lines.extend(f"data: {line}" for line in data.split("\n"))
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
+
+
+def make_initial_summary(
+    request_id: str,
+    method: str,
+    request_path: str,
+    parsed_body: dict[str, Any] | None,
+    body_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "started_at": now_iso(),
+        "completed_at": None,
+        "method": method,
+        "path": request_path,
+        "upstream_url": f"{UPSTREAM_BASE}/responses",
+        "status": None,
+        "model": parsed_body.get("model") if parsed_body else None,
+        "input_items": len(parsed_body.get("input", []))
+        if parsed_body and isinstance(parsed_body.get("input"), list)
+        else None,
+        "tool_count": len(parsed_body.get("tools", []))
+        if parsed_body and isinstance(parsed_body.get("tools"), list)
+        else 0,
+        "request_body_bytes": body_bytes,
+        "response_bytes": 0,
+        "event_count": 0,
+        "event_types": {},
+        "latency_ms": None,
+        "first_event_ms": None,
+        "ttft_ms": None,
+        "completed_event_ms": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "cached_tokens": None,
+        "cache_write_tokens": None,
+        "cache_hit_ratio": None,
+        "output_text_preview": "",
+        "tool_calls": [],
+        "errors": [],
+        "filtered_reasoning_summary": FILTER_REASONING_SUMMARY,
+    }
+
+
+def update_usage(summary: dict[str, Any], usage: dict[str, Any] | None) -> None:
+    if not isinstance(usage, dict):
+        return
+    summary["input_tokens"] = usage.get("input_tokens", summary.get("input_tokens"))
+    summary["output_tokens"] = usage.get("output_tokens", summary.get("output_tokens"))
+    summary["total_tokens"] = usage.get("total_tokens", summary.get("total_tokens"))
+    details = usage.get("input_tokens_details") or {}
+    summary["cached_tokens"] = details.get(
+        "cached_tokens", details.get("cache_read_tokens", summary.get("cached_tokens"))
+    )
+    summary["cache_write_tokens"] = details.get(
+        "cache_write_tokens",
+        details.get(
+            "cache_write_input_tokens",
+            usage.get(
+                "cache_write_tokens",
+                usage.get("cache_write_input_tokens", summary.get("cache_write_tokens")),
+            ),
+        ),
+    )
+    if summary.get("input_tokens") and summary.get("cached_tokens") is not None:
+        summary["cache_hit_ratio"] = round(
+            summary["cached_tokens"] / summary["input_tokens"], 4
+        )
+
+
+def observe_event(
+    summary: dict[str, Any],
+    event_name: str,
+    payload: Any,
+    elapsed_ms: int,
+) -> None:
+    summary["event_count"] += 1
+    event_types = summary["event_types"]
+    event_types[event_name or "<none>"] = event_types.get(event_name or "<none>", 0) + 1
+    if summary["first_event_ms"] is None:
+        summary["first_event_ms"] = elapsed_ms
+    if not isinstance(payload, dict):
+        return
+
+    if event_name == "response.output_text.delta":
+        if summary["ttft_ms"] is None:
+            summary["ttft_ms"] = elapsed_ms
+        summary["output_text_preview"] = (
+            summary.get("output_text_preview", "") + str(payload.get("delta", ""))
+        )[:5000]
+
+    if event_name == "response.function_call_arguments.delta" and summary["ttft_ms"] is None:
+        summary["ttft_ms"] = elapsed_ms
+
+    if event_name in {"response.output_item.added", "response.output_item.done"}:
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            call = {
+                "call_id": item.get("call_id"),
+                "name": item.get("name"),
+                "arguments": item.get("arguments", ""),
+                "status": item.get("status"),
+            }
+            existing = next(
+                (entry for entry in summary["tool_calls"] if entry.get("call_id") == call["call_id"]),
+                None,
+            )
+            if existing:
+                existing.update(call)
+            else:
+                summary["tool_calls"].append(call)
+
+    if event_name == "response.completed":
+        summary["completed_event_ms"] = elapsed_ms
+        summary["completed_at"] = now_iso()
+        response = payload.get("response") or {}
+        if isinstance(response, dict):
+            summary["model"] = response.get("model", summary.get("model"))
+            update_usage(summary, response.get("usage"))
+
+
+def list_summaries() -> list[dict[str, Any]]:
+    ensure_dirs()
+    summaries = [
+        read_json_if_exists(path)
+        for path in REQUESTS_DIR.glob("*.summary.json")
+    ]
+    return sorted(
+        [item for item in summaries if item],
+        key=lambda item: str(item.get("started_at", "")),
+        reverse=True,
+    )
+
+
+def load_events(request_id: str) -> list[Any]:
+    events_path = request_prefix(request_id).with_suffix(".events.jsonl")
+    if not events_path.exists():
+        return []
+    events: list[Any] = []
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        parsed = parse_json_maybe(line)
+        if parsed is not None:
+            events.append(parsed)
+    return events
+
+
+class ObserverHandler(BaseHTTPRequestHandler):
+    server_version = "VolcanoCodexObserver/0.1"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def send_json(self, status: int, value: Any) -> None:
+        body = json.dumps(value, indent=2, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.send_header("access-control-allow-origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text(self, status: int, value: str, content_type: str = "text/plain; charset=utf-8") -> None:
+        body = value.encode("utf-8")
+        self.send_response(status)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("access-control-allow-origin", "*")
+        self.send_header("access-control-allow-methods", "GET,POST,OPTIONS")
+        self.send_header("access-control-allow-headers", "content-type,authorization,user-agent")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        ensure_dirs()
+        clean_path = self.path.split("?", 1)[0]
+        if clean_path == "/health":
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "upstream_base": UPSTREAM_BASE,
+                    "log_dir": str(LOG_DIR),
+                    "filter_reasoning_summary": FILTER_REASONING_SUMMARY,
+                    "runtime": "python",
+                },
+            )
+            return
+        if clean_path == "/api/requests":
+            self.send_json(200, {"requests": list_summaries()})
+            return
+        if clean_path.startswith("/api/requests/"):
+            request_id = Path(clean_path).name
+            summary = read_json_if_exists(request_prefix(request_id).with_suffix(".summary.json"))
+            if not summary:
+                self.send_json(404, {"error": "request not found"})
+                return
+            self.send_json(
+                200,
+                {
+                    "summary": summary,
+                    "request": read_json_if_exists(request_prefix(request_id).with_suffix(".request.json")),
+                    "events": load_events(request_id),
+                },
+            )
+            return
+        self.serve_static(clean_path)
+
+    def do_POST(self) -> None:
+        clean_path = self.path.split("?", 1)[0]
+        if clean_path in {"/api/v3/responses", "/responses"}:
+            self.handle_proxy()
+            return
+        self.send_json(404, {"error": "not found"})
+
+    def serve_static(self, clean_path: str) -> None:
+        relative = "index.html" if clean_path == "/" else clean_path.lstrip("/")
+        target = (STATIC_DIR / relative).resolve()
+        try:
+            target.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            self.send_text(403, "Forbidden")
+            return
+        if not target.is_file():
+            self.send_text(404, "Not found")
+            return
+        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_body(self) -> bytes:
+        length = int(self.headers.get("content-length") or "0")
+        if length > MAX_BODY_BYTES:
+            raise ValueError(f"request body exceeds {MAX_BODY_BYTES} bytes")
+        return self.rfile.read(length)
+
+    def handle_proxy(self) -> None:
+        ensure_dirs()
+        started = time.time()
+        request_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        prefix = request_prefix(request_id)
+        events_path = prefix.with_suffix(".events.jsonl")
+        summary: dict[str, Any] | None = None
+
+        try:
+            body = self.read_body()
+            parsed_body = parse_json_maybe(body)
+            if parsed_body is not None and not isinstance(parsed_body, dict):
+                parsed_body = None
+            summary = make_initial_summary(
+                request_id,
+                self.command,
+                self.path,
+                parsed_body,
+                len(body),
+            )
+
+            prefix.with_suffix(".request.json").write_text(
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "captured_at": now_iso(),
+                        "headers": redact_headers(dict(self.headers.items())),
+                        "body": parsed_body if parsed_body is not None else body.decode("utf-8", "replace"),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            upstream_headers = {
+                "content-type": self.headers.get("content-type", "application/json"),
+                "accept": self.headers.get("accept", "text/event-stream"),
+                "user-agent": self.headers.get(
+                    "user-agent", os.environ.get("USER_AGENT", "volcano-codex-observer/0.1")
+                ),
+            }
+            auth = self.headers.get("authorization")
+            if not auth and os.environ.get("ARK_API_KEY"):
+                auth = f"Bearer {os.environ['ARK_API_KEY']}"
+            if auth:
+                upstream_headers["authorization"] = auth
+
+            request = urllib.request.Request(
+                f"{UPSTREAM_BASE}/responses",
+                data=body,
+                headers=upstream_headers,
+                method="POST",
+            )
+
+            with urllib.request.urlopen(request, timeout=300) as upstream, events_path.open(
+                "a", encoding="utf-8"
+            ) as events_file:
+                summary["status"] = upstream.status
+                self.send_response(upstream.status)
+                self.send_header(
+                    "content-type",
+                    upstream.headers.get("content-type", "text/event-stream; charset=utf-8"),
+                )
+                self.send_header("cache-control", "no-cache")
+                self.send_header("x-observer-request-id", request_id)
+                self.end_headers()
+
+                pending = ""
+                while True:
+                    chunk = upstream.read(4096)
+                    if not chunk:
+                        break
+                    text_chunk = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
+                    pending += text_chunk
+                    summary["response_bytes"] += len(text_chunk.encode("utf-8"))
+
+                    while "\n\n" in pending:
+                        block, pending = pending.split("\n\n", 1)
+                        if not block.strip():
+                            continue
+                        event, data = parse_sse_block(block)
+                        payload = parse_json_maybe(data)
+                        event_name = event or (payload.get("type") if isinstance(payload, dict) else "")
+                        elapsed_ms = int((time.time() - started) * 1000)
+                        events_file.write(
+                            json.dumps(
+                                {
+                                    "ts": now_iso(),
+                                    "elapsed_ms": elapsed_ms,
+                                    "event": event_name,
+                                    "data": payload if payload is not None else data,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                        events_file.flush()
+                        observe_event(summary, event_name, payload, elapsed_ms)
+                        if FILTER_REASONING_SUMMARY and event_name.startswith("response.reasoning_summary"):
+                            continue
+                        self.wfile.write(format_sse_block(event, data))
+                        self.wfile.flush()
+
+                if pending:
+                    elapsed_ms = int((time.time() - started) * 1000)
+                    events_file.write(
+                        json.dumps(
+                            {
+                                "ts": now_iso(),
+                                "elapsed_ms": elapsed_ms,
+                                "event": "<trailing-bytes>",
+                                "data": pending,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    self.wfile.write(pending.encode("utf-8"))
+
+            summary["latency_ms"] = int((time.time() - started) * 1000)
+            summary["completed_at"] = summary.get("completed_at") or now_iso()
+            prefix.with_suffix(".summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except urllib.error.HTTPError as error:
+            self.write_proxy_error(prefix, summary, started, error.code, error)
+        except Exception as error:
+            self.write_proxy_error(prefix, summary, started, 500, error)
+
+    def write_proxy_error(
+        self,
+        prefix: Path,
+        summary: dict[str, Any] | None,
+        started: float,
+        status: int,
+        error: BaseException,
+    ) -> None:
+        if summary is None:
+            summary = {
+                "request_id": prefix.name,
+                "started_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                "errors": [],
+            }
+        summary["status"] = summary.get("status") or status
+        summary["completed_at"] = now_iso()
+        summary["latency_ms"] = int((time.time() - started) * 1000)
+        summary.setdefault("errors", []).append("".join(traceback.format_exception_only(type(error), error)).strip())
+        prefix.with_suffix(".summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if not getattr(self, "_headers_buffer", None):
+            self.send_json(status, {"error": str(error), "request_id": prefix.name})
+
+
+def main() -> None:
+    ensure_dirs()
+    server = ThreadingHTTPServer((HOST, PORT), ObserverHandler)
+    print("Volcano Codex Observer")
+    print(f"  dashboard: http://{HOST}:{PORT}/")
+    print(f"  proxy:     http://{HOST}:{PORT}/api/v3/responses")
+    print(f"  upstream:  {UPSTREAM_BASE}/responses")
+    print(f"  logs:      {LOG_DIR}")
+    if FILTER_REASONING_SUMMARY:
+        print("  filter:    response.reasoning_summary_* events")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

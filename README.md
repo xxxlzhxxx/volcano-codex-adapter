@@ -12,6 +12,9 @@ for Codex-style `User-Agent` routing.
   requests to Ark.
 - `observer/proxy.py`: local Responses API proxy with token, cache, latency,
   tool-call, and raw SSE logging plus a browser dashboard.
+- `observer/responses_protocol.py`: stateful Ark-to-Responses stream
+  normalizer that validates output-item lifecycles and supplies required empty
+  schema fields on streaming item frames.
 - `observer/proxy.js`: optional Node.js implementation of the same observer.
 - `tests/run_tests.sh`: local shell tests for apply, status, rollback, and
   dry-run behavior.
@@ -141,6 +144,78 @@ The observer forwards traffic to Ark and records:
 - latency, first event, and TTFT
 - function/tool calls
 - output text preview
+
+### Responses protocol normalization
+
+The observer normalizes provider streaming frames at the Responses API
+boundary. This is a schema adapter, not a Codex core patch:
+
+- It tracks the active `response.output_item.added` item until the matching
+  `response.output_item.done`.
+- It supplies required empty fields omitted by some compatible providers on
+  in-progress frames: `message.content`, `reasoning.summary`,
+  `reasoning.encrypted_content`, and `function_call.arguments`.
+- It does not synthesize token usage, tool calls, completed responses, or
+  response text.
+- It preserves the upstream frame as `raw_data`, records every applied
+  normalization, and records protocol warnings for invalid event ordering.
+
+This lets Codex deserialize an in-progress item before consuming its text or
+reasoning deltas. Without a valid active item, Codex correctly rejects
+`response.output_text.delta` as an invalid stream transition.
+
+### Import external logs
+
+Import normalized CLI, SDK, app-server, rollout, or custom JSON events into
+the same dashboard storage:
+
+```bash
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  --data-binary @import.json \
+  http://127.0.0.1:17860/api/import
+```
+
+The import envelope is versioned:
+
+```json
+{
+  "schema_version": "observer.import.v1",
+  "request_id": "surface-sdk-001",
+  "source": {
+    "kind": "codex_sdk",
+    "name": "openai-codex-python"
+  },
+  "thread": {
+    "thread_id": "thread-id",
+    "turn_id": "turn-id",
+    "originator": "codex_python_sdk"
+  },
+  "request": {
+    "method": "IMPORT",
+    "path": "/api/import",
+    "status": 200,
+    "body": {}
+  },
+  "events": [
+    {
+      "elapsed_ms": 20,
+      "event": "turn.completed",
+      "data": {
+        "usage": {
+          "input_tokens": 8000,
+          "cached_input_tokens": 4096,
+          "output_tokens": 40
+        }
+      }
+    }
+  ]
+}
+```
+
+The observer rebuilds the summary from events instead of trusting imported
+summary fields. It accepts Responses usage, Codex CLI usage, Python SDK
+`ThreadTokenUsage`, and app-server `thread/tokenUsage/updated` fields.
 
 Logs are written under:
 

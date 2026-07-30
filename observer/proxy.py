@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from responses_protocol import ResponsesStreamNormalizer
+
 
 HOST = os.environ.get("OBSERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OBSERVER_PORT", "17860"))
@@ -104,6 +106,8 @@ def make_initial_summary(
     body_bytes: int,
 ) -> dict[str, Any]:
     return {
+        "schema_version": "observer.summary.v1",
+        "source": {"kind": "proxy"},
         "request_id": request_id,
         "started_at": now_iso(),
         "completed_at": None,
@@ -131,6 +135,7 @@ def make_initial_summary(
         "total_tokens": None,
         "cached_tokens": None,
         "cache_write_tokens": None,
+        "reasoning_output_tokens": None,
         "cache_hit_ratio": None,
         "output_text_preview": "",
         "tool_calls": [],
@@ -142,12 +147,34 @@ def make_initial_summary(
 def update_usage(summary: dict[str, Any], usage: dict[str, Any] | None) -> None:
     if not isinstance(usage, dict):
         return
-    summary["input_tokens"] = usage.get("input_tokens", summary.get("input_tokens"))
-    summary["output_tokens"] = usage.get("output_tokens", summary.get("output_tokens"))
-    summary["total_tokens"] = usage.get("total_tokens", summary.get("total_tokens"))
+    aggregate = usage.get("total")
+    if isinstance(aggregate, dict):
+        usage = aggregate
+    summary["input_tokens"] = usage.get(
+        "input_tokens", usage.get("inputTokens", summary.get("input_tokens"))
+    )
+    summary["output_tokens"] = usage.get(
+        "output_tokens", usage.get("outputTokens", summary.get("output_tokens"))
+    )
+    summary["total_tokens"] = usage.get(
+        "total_tokens", usage.get("totalTokens", summary.get("total_tokens"))
+    )
+    if summary["total_tokens"] is None and (
+        summary["input_tokens"] is not None or summary["output_tokens"] is not None
+    ):
+        summary["total_tokens"] = (summary["input_tokens"] or 0) + (
+            summary["output_tokens"] or 0
+        )
     details = usage.get("input_tokens_details") or {}
     summary["cached_tokens"] = details.get(
-        "cached_tokens", details.get("cache_read_tokens", summary.get("cached_tokens"))
+        "cached_tokens",
+        details.get(
+            "cache_read_tokens",
+            usage.get(
+                "cached_input_tokens",
+                usage.get("cachedInputTokens", summary.get("cached_tokens")),
+            ),
+        ),
     )
     summary["cache_write_tokens"] = details.get(
         "cache_write_tokens",
@@ -155,9 +182,18 @@ def update_usage(summary: dict[str, Any], usage: dict[str, Any] | None) -> None:
             "cache_write_input_tokens",
             usage.get(
                 "cache_write_tokens",
-                usage.get("cache_write_input_tokens", summary.get("cache_write_tokens")),
+                usage.get(
+                    "cache_write_input_tokens",
+                    usage.get(
+                        "cacheWriteInputTokens", summary.get("cache_write_tokens")
+                    ),
+                ),
             ),
         ),
+    )
+    summary["reasoning_output_tokens"] = usage.get(
+        "reasoning_output_tokens",
+        usage.get("reasoningOutputTokens", summary.get("reasoning_output_tokens")),
     )
     if summary.get("input_tokens") and summary.get("cached_tokens") is not None:
         summary["cache_hit_ratio"] = round(
@@ -215,6 +251,35 @@ def observe_event(
             summary["model"] = response.get("model", summary.get("model"))
             update_usage(summary, response.get("usage"))
 
+    if event_name in {"turn.completed", "turn/completed"}:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            usage = (payload.get("turn") or {}).get("usage")
+        update_usage(summary, usage)
+        summary["completed_event_ms"] = elapsed_ms
+        summary["completed_at"] = now_iso()
+
+    if event_name in {"item.agent_message.delta", "item/agentMessage/delta"}:
+        delta = payload.get("delta", "")
+        if summary["ttft_ms"] is None:
+            summary["ttft_ms"] = elapsed_ms
+        summary["output_text_preview"] = (
+            summary.get("output_text_preview", "") + str(delta)
+        )[:5000]
+
+    if event_name in {"item.completed", "item/completed"}:
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("type") in {
+            "agent_message",
+            "agentMessage",
+        }:
+            text = item.get("text", "")
+            if text and not summary.get("output_text_preview"):
+                summary["output_text_preview"] = str(text)[:5000]
+
+    if event_name == "thread/tokenUsage/updated":
+        update_usage(summary, payload.get("tokenUsage"))
+
 
 def list_summaries() -> list[dict[str, Any]]:
     ensure_dirs()
@@ -239,6 +304,108 @@ def load_events(request_id: str) -> list[Any]:
         if parsed is not None:
             events.append(parsed)
     return events
+
+
+def import_observer_log(envelope: dict[str, Any]) -> dict[str, Any]:
+    if envelope.get("schema_version") != "observer.import.v1":
+        raise ValueError("schema_version must be observer.import.v1")
+    source = envelope.get("source")
+    request_capture = envelope.get("request")
+    events = envelope.get("events")
+    if not isinstance(source, dict) or not source.get("kind"):
+        raise ValueError("source.kind is required")
+    if not isinstance(request_capture, dict):
+        raise ValueError("request must be an object")
+    if not isinstance(events, list):
+        raise ValueError("events must be an array")
+
+    request_id = str(
+        envelope.get("request_id")
+        or f"import-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    )
+    prefix = request_prefix(request_id)
+    if prefix.with_suffix(".summary.json").exists() and envelope.get("mode") != "replace":
+        raise ValueError(f"request_id already exists: {request_id}")
+
+    body = request_capture.get("body")
+    parsed_body = body if isinstance(body, dict) else None
+    body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8")) if body is not None else 0
+    summary = make_initial_summary(
+        request_id,
+        str(request_capture.get("method", "IMPORT")),
+        str(request_capture.get("path", "/api/import")),
+        parsed_body,
+        body_bytes,
+    )
+    summary["schema_version"] = "observer.summary.v1"
+    summary["source"] = {
+        **source,
+        "imported_at": now_iso(),
+    }
+    if isinstance(envelope.get("thread"), dict):
+        summary["thread"] = envelope["thread"]
+    summary["status"] = request_capture.get("status")
+    summary["upstream_url"] = request_capture.get("upstream_url")
+
+    normalized_records: list[dict[str, Any]] = []
+    normalizer = ResponsesStreamNormalizer()
+    for index, record in enumerate(events):
+        if not isinstance(record, dict):
+            raise ValueError(f"events[{index}] must be an object")
+        elapsed_ms = int(record.get("elapsed_ms") or 0)
+        event_name = str(record.get("event") or record.get("method") or "")
+        payload = record.get("data", record.get("params", record.get("payload")))
+        frame = normalizer.normalize(event_name, payload)
+        normalized_record = {
+            "schema_version": "observer.event.v1",
+            "ts": str(record.get("ts") or now_iso()),
+            "elapsed_ms": elapsed_ms,
+            "event": frame.event,
+            "data": frame.payload,
+            "source_event": event_name,
+            "normalizations": frame.changes,
+            "protocol_warnings": frame.warnings,
+        }
+        normalized_records.append(normalized_record)
+        observe_event(summary, frame.event, frame.payload, elapsed_ms)
+
+    if summary["status"] is None:
+        summary["status"] = 200 if summary["completed_at"] else "imported"
+    supplied = envelope.get("summary")
+    if isinstance(supplied, dict):
+        for key in ("latency_ms", "first_event_ms", "ttft_ms", "completed_event_ms"):
+            if supplied.get(key) is not None:
+                summary[key] = supplied[key]
+    summary["completed_at"] = summary.get("completed_at") or now_iso()
+
+    if envelope.get("mode") == "dry_run":
+        return {"request_id": request_id, "status": "validated", "summary": summary}
+
+    ensure_dirs()
+    prefix.with_suffix(".request.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "observer.request.v1",
+                "request_id": request_id,
+                "captured_at": now_iso(),
+                "source": source,
+                "headers": redact_headers(request_capture.get("headers") or {}),
+                "body": body,
+                "raw": request_capture.get("raw"),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    prefix.with_suffix(".events.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in normalized_records),
+        encoding="utf-8",
+    )
+    prefix.with_suffix(".summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return {"request_id": request_id, "status": "imported", "summary": summary}
 
 
 class ObserverHandler(BaseHTTPRequestHandler):
@@ -310,6 +477,17 @@ class ObserverHandler(BaseHTTPRequestHandler):
         clean_path = self.path.split("?", 1)[0]
         if clean_path in {"/api/v3/responses", "/responses"}:
             self.handle_proxy()
+            return
+        if clean_path == "/api/import":
+            try:
+                body = self.read_body()
+                envelope = parse_json_maybe(body)
+                if not isinstance(envelope, dict):
+                    raise ValueError("import body must be a JSON object")
+                result = import_observer_log(envelope)
+                self.send_json(200, result)
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)})
             return
         self.send_json(404, {"error": "not found"})
 
@@ -396,6 +574,7 @@ class ObserverHandler(BaseHTTPRequestHandler):
             with urllib.request.urlopen(request, timeout=300) as upstream, events_path.open(
                 "a", encoding="utf-8"
             ) as events_file:
+                normalizer = ResponsesStreamNormalizer()
                 summary["status"] = upstream.status
                 self.send_response(upstream.status)
                 self.send_header(
@@ -421,25 +600,44 @@ class ObserverHandler(BaseHTTPRequestHandler):
                             continue
                         event, data = parse_sse_block(block)
                         payload = parse_json_maybe(data)
-                        event_name = event or (payload.get("type") if isinstance(payload, dict) else "")
+                        frame = normalizer.normalize(event, payload)
+                        event_name = frame.event
+                        normalized_payload = frame.payload
                         elapsed_ms = int((time.time() - started) * 1000)
                         events_file.write(
                             json.dumps(
                                 {
+                                    "schema_version": "observer.event.v1",
                                     "ts": now_iso(),
                                     "elapsed_ms": elapsed_ms,
                                     "event": event_name,
-                                    "data": payload if payload is not None else data,
+                                    "data": normalized_payload
+                                    if normalized_payload is not None
+                                    else data,
+                                    "source_event": event
+                                    or (
+                                        payload.get("type", "")
+                                        if isinstance(payload, dict)
+                                        else ""
+                                    ),
+                                    "raw_data": payload if payload is not None else data,
+                                    "normalizations": frame.changes,
+                                    "protocol_warnings": frame.warnings,
                                 },
                                 ensure_ascii=False,
                             )
                             + "\n"
                         )
                         events_file.flush()
-                        observe_event(summary, event_name, payload, elapsed_ms)
+                        observe_event(summary, event_name, normalized_payload, elapsed_ms)
                         if FILTER_REASONING_SUMMARY and event_name.startswith("response.reasoning_summary"):
                             continue
-                        self.wfile.write(format_sse_block(event, data))
+                        forwarded_data = (
+                            json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
+                            if normalized_payload is not None
+                            else data
+                        )
+                        self.wfile.write(format_sse_block(event_name, forwarded_data))
                         self.wfile.flush()
 
                 if pending:

@@ -57,6 +57,9 @@ fi
 python3 -m py_compile "$PROXY_SCRIPT"
 pass "observer proxy passes Python syntax check"
 
+python3 "$SCRIPT_DIR/test_observer_protocol.py"
+pass "observer protocol normalizer and import mapping pass unit tests"
+
 cat > "$TEST_ROOT/mock_upstream.py" <<'EOF'
 #!/usr/bin/env python3
 import json
@@ -202,5 +205,60 @@ pass "observer detail endpoint returns raw events"
 curl -fsS http://127.0.0.1:18082/ > "$TEST_ROOT/index.html"
 grep -q 'Volcano Codex Observer' "$TEST_ROOT/index.html" || fail "dashboard HTML not served"
 pass "observer serves dashboard frontend"
+
+cat > "$TEST_ROOT/import.json" <<'EOF'
+{
+  "schema_version": "observer.import.v1",
+  "request_id": "imported-sdk-test",
+  "source": {
+    "kind": "codex_sdk",
+    "name": "openai-codex-python"
+  },
+  "thread": {
+    "thread_id": "thread-import",
+    "turn_id": "turn-import"
+  },
+  "request": {
+    "method": "IMPORT",
+    "path": "/api/import",
+    "status": 200,
+    "body": {}
+  },
+  "events": [
+    {
+      "elapsed_ms": 10,
+      "event": "item/agentMessage/delta",
+      "data": {
+        "delta": "SDK_OK"
+      }
+    },
+    {
+      "elapsed_ms": 20,
+      "event": "turn.completed",
+      "data": {
+        "usage": {
+          "total": {
+            "inputTokens": 80,
+            "cachedInputTokens": 40,
+            "outputTokens": 5,
+            "totalTokens": 85
+          }
+        }
+      }
+    }
+  ]
+}
+EOF
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  --data-binary "@$TEST_ROOT/import.json" \
+  http://127.0.0.1:18082/api/import > "$TEST_ROOT/import-result.json"
+grep -q '"status": "imported"' "$TEST_ROOT/import-result.json" || fail "import API did not accept SDK log"
+curl -fsS http://127.0.0.1:18082/api/requests/imported-sdk-test > "$TEST_ROOT/import-detail.json"
+grep -q '"total_tokens": 85' "$TEST_ROOT/import-detail.json" || fail "import API did not rebuild token usage"
+grep -q '"cached_tokens": 40' "$TEST_ROOT/import-detail.json" || fail "import API did not rebuild cached usage"
+grep -q '"output_text_preview": "SDK_OK"' "$TEST_ROOT/import-detail.json" || fail "import API did not rebuild output"
+pass "observer imports SDK logs into dashboard storage"
 
 printf '\nAll Volcano Codex Observer tests passed.\n'

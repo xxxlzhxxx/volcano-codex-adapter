@@ -1,5 +1,6 @@
 .ark-switch/
 .ark-observer/
+.volcano-codex/
 .env
 *.log
 .DS_Store

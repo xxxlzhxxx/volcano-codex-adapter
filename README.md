@@ -7,6 +7,7 @@ for Codex-style `User-Agent` routing.
 ## Files
 
 - `switch_to_ark.sh`: detects project type and applies Ark model settings.
+- `volcano_codex.sh`: one-command observed setup for a target work directory.
 - `smoke_test_ark_responses.sh`: sends Codex-compatible Responses API test
   requests to Ark.
 - `observer/proxy.py`: local Responses API proxy with token, cache, latency,
@@ -18,6 +19,8 @@ for Codex-style `User-Agent` routing.
   app-server, TypeScript SDK, and Python SDK configuration surfaces.
 - `tests/run_observer_tests.sh`: local mock-upstream tests for the observer
   proxy and dashboard API.
+- `tests/run_outer_script_tests.sh`: end-to-end test for work-dir scoped
+  observed setup, metrics capture, status, and rollback.
 
 ## Supported Project Types
 
@@ -55,6 +58,49 @@ ARK_API_KEY="..." codex
 ```
 
 ## Observer Dashboard
+
+One-command observed setup for a specific work directory:
+
+```bash
+cd /path/to/volcano-codex-adapter
+./volcano_codex.sh apply-observed \
+  --work-dir /path/to/project \
+  --api-key "..." \
+  --model "ep-..."
+```
+
+This starts the Python observer, switches that work directory to the observed
+Volcano provider, and stores all state under:
+
+```text
+/path/to/project/.volcano-codex/
+```
+
+The work-dir scoped layout is:
+
+```text
+.volcano-codex/
+  codex-home/config.toml          # Codex config for this work dir
+  observer/requests/              # request summaries, raw events, request body
+  observer.pid                    # observer process id
+  state.env                       # non-secret runtime state
+```
+
+Run Codex against that work-dir scoped config:
+
+```bash
+cd /path/to/project
+CODEX_HOME="/path/to/project/.volcano-codex/codex-home" \
+ARK_API_KEY="..." \
+codex
+```
+
+Check or rollback:
+
+```bash
+./volcano_codex.sh status --work-dir /path/to/project
+./volcano_codex.sh rollback --work-dir /path/to/project
+```
 
 Start a local model-provider proxy:
 
@@ -210,6 +256,7 @@ Run:
 ./tests/run_tests.sh
 ./tests/run_codex_surface_tests.sh
 ./tests/run_observer_tests.sh
+./tests/run_outer_script_tests.sh
 ```
 
 The tests create temporary fixtures and do not call the network.

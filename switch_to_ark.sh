@@ -11,6 +11,8 @@ ARK_BASE_URL="${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
 ARK_UA="${ARK_UA:-codex_exec/0.0.0 (Mac OS; arm64) dumb (codex_exec; 0.0.0)}"
 SCOPE="${SCOPE:-project}"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+OBSERVER="${OBSERVER:-0}"
+OBSERVER_BASE_URL="${OBSERVER_BASE_URL:-http://127.0.0.1:17860/api/v3}"
 DRY_RUN="false"
 BACKUP_ID=""
 
@@ -71,6 +73,14 @@ detect_project_type() {
   fi
 }
 
+effective_base_url() {
+  if [[ "$OBSERVER" == "1" || "$OBSERVER" == "true" ]]; then
+    echo "$OBSERVER_BASE_URL"
+  else
+    echo "$ARK_BASE_URL"
+  fi
+}
+
 backup_file() {
   local backup_dir="$1"
   local path="$2"
@@ -122,6 +132,8 @@ apply_codex_config() {
   local backup_dir="$2"
   local config_path=".codex/config.toml"
   local config_abs="${PROJECT_DIR}/${config_path}"
+  local provider_base_url
+  provider_base_url="$(effective_base_url)"
 
   if [[ "$SCOPE" == "home" ]]; then
     config_path="${CODEX_HOME_DIR}/config.toml"
@@ -149,7 +161,7 @@ model_provider = "volcengine-ark"
 
 [model_providers.volcengine-ark]
 name = "Volcengine Ark"
-base_url = "${ARK_BASE_URL}"
+base_url = "${provider_base_url}"
 env_key = "ARK_API_KEY"
 wire_api = "responses"
 http_headers = { "User-Agent" = "${ARK_UA}" }
@@ -168,6 +180,8 @@ apply_env_config() {
   local backup_dir="$2"
   local env_rel=".env"
   local env_abs="${PROJECT_DIR}/${env_rel}"
+  local provider_base_url
+  provider_base_url="$(effective_base_url)"
 
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[dry-run] Would append Ark env vars to $env_abs" >&2
@@ -184,9 +198,10 @@ ARK_API_KEY=${ARK_API_KEY}
 ARK_MODEL=${ARK_MODEL}
 ARK_BASE_URL=${ARK_BASE_URL}
 OPENAI_API_KEY=${ARK_API_KEY}
-OPENAI_BASE_URL=${ARK_BASE_URL}
+OPENAI_BASE_URL=${provider_base_url}
 OPENAI_MODEL=${ARK_MODEL}
 OPENAI_USER_AGENT=${ARK_UA}
+VOLCANO_CODEX_OBSERVER=${OBSERVER}
 # <<< ark-switch:${backup_id}
 EOF
 

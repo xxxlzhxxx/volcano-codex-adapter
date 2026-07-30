@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Volcano Codex Observer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Model Provider Tap</p>
+          <h1>Volcano Codex Observer</h1>
+          <p class="lede">
+            A local lens for Ark Responses traffic: latency, token burn, cache
+            signals, tool calls, and raw SSE frames in one place.
+          </p>
+        </div>
+        <div class="hero-card">
+          <span class="pulse"></span>
+          <div>
+            <strong id="health-label">Checking proxy</strong>
+            <small id="health-detail">Waiting for /health</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="controls">
+        <label>
+          Search
+          <input id="search" type="search" placeholder="request id, model, tool..." />
+        </label>
+        <label>
+          Auto refresh
+          <select id="refresh">
+            <option value="0">Off</option>
+            <option value="3000" selected>3s</option>
+            <option value="10000">10s</option>
+          </select>
+        </label>
+        <button id="reload">Refresh now</button>
+      </section>
+
+      <section class="metric-grid" id="metrics">
+        <article><span>Total Requests</span><strong>0</strong></article>
+        <article><span>Total Tokens</span><strong>0</strong></article>
+        <article><span>Avg TTFT</span><strong>-</strong></article>
+        <article><span>Cache Hit</span><strong>-</strong></article>
+      </section>
+
+      <section class="workspace">
+        <aside class="request-list" id="request-list"></aside>
+        <section class="detail" id="detail">
+          <div class="empty">
+            <h2>No request selected</h2>
+            <p>Run Codex through the observer proxy, then select a captured request.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <template id="request-row-template">
+      <button class="request-row">
+        <span class="row-top">
+          <strong class="row-id"></strong>
+          <em class="row-status"></em>
+        </span>
+        <span class="row-meta"></span>
+      </button>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

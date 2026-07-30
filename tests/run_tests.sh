@@ -139,6 +139,31 @@ test_home_scope_unknown_project_writes_codex_home() {
   assert_file_missing "$codex_home/config.toml" "home-scope unknown project rollback removes new Codex home config"
 }
 
+test_observer_mode_writes_local_base_url() {
+  local dir="$TEST_ROOT/observer-mode"
+  local codex_home="$TEST_ROOT/observer-mode-codex-home"
+  mkdir -p "$dir" "$codex_home"
+
+  PROJECT_DIR="$dir" \
+    CODEX_HOME="$codex_home" \
+    SCOPE=home \
+    OBSERVER=1 \
+    OBSERVER_BASE_URL="http://127.0.0.1:17860/api/v3" \
+    ARK_MODEL="$ARK_MODEL" \
+    ARK_API_KEY="$ARK_API_KEY" \
+    "$SWITCH_SCRIPT" apply >/dev/null
+
+  assert_file_contains "$codex_home/config.toml" 'base_url = "http://127.0.0.1:17860/api/v3"' "observer mode writes local proxy base URL"
+
+  PROJECT_DIR="$dir" \
+    CODEX_HOME="$codex_home" \
+    SCOPE=home \
+    OBSERVER=1 \
+    ARK_MODEL="$ARK_MODEL" \
+    ARK_API_KEY="$ARK_API_KEY" \
+    "$SWITCH_SCRIPT" rollback >/dev/null
+}
+
 test_node_env_rollback() {
   local dir="$TEST_ROOT/node"
   mkdir -p "$dir"
@@ -191,6 +216,7 @@ test_codex_new_config_rollback
 test_codex_existing_config_rollback
 test_codex_home_scope_rollback
 test_home_scope_unknown_project_writes_codex_home
+test_observer_mode_writes_local_base_url
 test_node_env_rollback
 test_python_env_rollback
 test_dry_run_no_write

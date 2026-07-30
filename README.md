@@ -9,10 +9,14 @@ for Codex-style `User-Agent` routing.
 - `switch_to_ark.sh`: detects project type and applies Ark model settings.
 - `smoke_test_ark_responses.sh`: sends Codex-compatible Responses API test
   requests to Ark.
+- `observer/proxy.js`: local Responses API proxy with token, cache, latency,
+  tool-call, and raw SSE logging plus a browser dashboard.
 - `tests/run_tests.sh`: local shell tests for apply, status, rollback, and
   dry-run behavior.
 - `tests/run_codex_surface_tests.sh`: local shell tests for Codex CLI,
   app-server, TypeScript SDK, and Python SDK configuration surfaces.
+- `tests/run_observer_tests.sh`: local mock-upstream tests for the observer
+  proxy and dashboard API.
 
 ## Supported Project Types
 
@@ -48,6 +52,69 @@ Then run Codex:
 ```bash
 ARK_API_KEY="..." codex
 ```
+
+## Observer Dashboard
+
+Start a local model-provider proxy:
+
+```bash
+cd /path/to/volcano-codex-adapter
+export ARK_API_KEY="..."
+node observer/proxy.js
+```
+
+Open the dashboard:
+
+```text
+http://127.0.0.1:17860/
+```
+
+Switch Codex to the observed provider endpoint:
+
+```bash
+cd /path/to/project
+export ARK_API_KEY="..."
+export ARK_MODEL="ep-..."
+SCOPE=home OBSERVER=1 /path/to/volcano-codex-adapter/switch_to_ark.sh apply
+```
+
+Codex now sends Responses API traffic to:
+
+```text
+http://127.0.0.1:17860/api/v3/responses
+```
+
+The observer forwards traffic to Ark and records:
+
+- request body and redacted headers
+- raw SSE events
+- input/output/total tokens
+- cached tokens and cache hit ratio
+- cache write tokens when present
+- latency, first event, and TTFT
+- function/tool calls
+- output text preview
+
+Logs are written under:
+
+```text
+.ark-observer/requests/
+```
+
+Useful observer variables:
+
+```bash
+export OBSERVER_HOST="127.0.0.1"
+export OBSERVER_PORT="17860"
+export ARK_UPSTREAM_BASE="https://ark.cn-beijing.volces.com/api/v3"
+export OBSERVER_LOG_DIR="/tmp/ark-observer"
+export OBSERVER_FILTER_REASONING_SUMMARY=1
+```
+
+`OBSERVER_FILTER_REASONING_SUMMARY=1` drops `response.reasoning_summary_*`
+SSE events before forwarding them to Codex. This is useful for debugging Ark
+compatibility issues where Codex rejects unexpected reasoning-summary event
+ordering.
 
 For Node, Python, and unknown projects, the script writes OpenAI-compatible
 variables to `.env`:
@@ -137,6 +204,7 @@ Run:
 ```bash
 ./tests/run_tests.sh
 ./tests/run_codex_surface_tests.sh
+./tests/run_observer_tests.sh
 ```
 
 The tests create temporary fixtures and do not call the network.

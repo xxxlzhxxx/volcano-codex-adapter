@@ -1,4 +1,5 @@
 .ark-switch/
+.ark-observer/
 .env
 *.log
 .DS_Store

@@ -11,6 +11,8 @@ for Codex-style `User-Agent` routing.
   requests to Ark.
 - `tests/run_tests.sh`: local shell tests for apply, status, rollback, and
   dry-run behavior.
+- `tests/run_codex_surface_tests.sh`: local shell tests for Codex CLI,
+  app-server, TypeScript SDK, and Python SDK configuration surfaces.
 
 ## Supported Project Types
 
@@ -24,21 +26,27 @@ for Codex-style `User-Agent` routing.
 
 ## Switch a Project to Ark
 
-For a Codex project, the script writes project-local `.codex/config.toml`.
-The config references `ARK_API_KEY` by environment variable and does not write
-the key into TOML.
+For a Codex project, two scopes are supported:
+
+- `SCOPE=project` writes project-local `.codex/config.toml`.
+- `SCOPE=home` writes `${CODEX_HOME:-$HOME/.codex}/config.toml`.
+
+For real Codex CLI, app-server, and SDK entry points, prefer `SCOPE=home`
+unless you have already verified that the project config layer is enabled for
+your trusted workspace. The config references `ARK_API_KEY` by environment
+variable and does not write the key into TOML.
 
 ```bash
 cd /path/to/project
 export ARK_API_KEY="..."
 export ARK_MODEL="ep-..."
-/path/to/volcano-codex-adapter/switch_to_ark.sh apply
+SCOPE=home /path/to/volcano-codex-adapter/switch_to_ark.sh apply
 ```
 
-Then run Codex with the generated profile:
+Then run Codex:
 
 ```bash
-ARK_API_KEY="..." codex -p ark
+ARK_API_KEY="..." codex
 ```
 
 For Node, Python, and unknown projects, the script writes OpenAI-compatible
@@ -59,10 +67,16 @@ passes it to the SDK as a custom header.
 
 ## Rollback
 
-Each `apply` creates a project-local backup under:
+Each `apply` creates a rollback backup. `SCOPE=project` stores it under:
 
 ```text
 .ark-switch/backups/<timestamp>/
+```
+
+`SCOPE=home` stores it under:
+
+```text
+${CODEX_HOME:-$HOME/.codex}/.ark-switch/backups/<timestamp>/
 ```
 
 Rollback the most recent change:
@@ -122,14 +136,15 @@ Run:
 
 ```bash
 ./tests/run_tests.sh
+./tests/run_codex_surface_tests.sh
 ```
 
 The tests create temporary fixtures and do not call the network.
 
 ## Notes
 
-- Default scope is project-local. The script intentionally does not modify
-  `~/.codex/config.toml`.
+- Default scope is project-local. Use `SCOPE=home` explicitly when you want to
+  modify `${CODEX_HOME:-$HOME/.codex}/config.toml`.
 - Ark may emit `response.reasoning_summary_*` SSE events even when the request
   sets `reasoning.summary = "none"`.
 - The Codex provider config injects a Codex-style `User-Agent` with

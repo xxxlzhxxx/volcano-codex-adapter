@@ -53,6 +53,18 @@ run_switch() {
     "$SWITCH_SCRIPT" "$@"
 }
 
+run_switch_home_scope() {
+  local project_dir="$1"
+  local codex_home="$2"
+  shift 2
+  PROJECT_DIR="$project_dir" \
+    CODEX_HOME="$codex_home" \
+    SCOPE=home \
+    ARK_MODEL="$ARK_MODEL" \
+    ARK_API_KEY="$ARK_API_KEY" \
+    "$SWITCH_SCRIPT" "$@"
+}
+
 make_codex_fixture() {
   local dir="$1"
   mkdir -p "$dir/codex-rs" "$dir/codex-cli"
@@ -93,6 +105,38 @@ test_codex_existing_config_rollback() {
     printf 'Existing Codex config was not restored.\n' >&2
     exit 1
   fi
+}
+
+test_codex_home_scope_rollback() {
+  local dir="$TEST_ROOT/codex-home-scope"
+  local codex_home="$TEST_ROOT/codex-home"
+  make_codex_fixture "$dir"
+  mkdir -p "$codex_home"
+  printf 'model = "gpt-5.1"\nmodel_provider = "openai"\n' > "$codex_home/config.toml"
+
+  run_switch_home_scope "$dir" "$codex_home" apply >/dev/null
+  assert_file_contains "$codex_home/config.toml" 'model_provider = "volcengine-ark"' "codex home-scope apply writes provider"
+  assert_file_contains "$codex_home/config.toml" 'User-Agent' "codex home-scope apply writes user-agent header"
+
+  run_switch_home_scope "$dir" "$codex_home" rollback >/dev/null
+  if cmp -s "$codex_home/config.toml" <(printf 'model = "gpt-5.1"\nmodel_provider = "openai"\n'); then
+    pass "codex home-scope rollback restores existing config"
+  else
+    printf 'Existing CODEX_HOME config was not restored.\n' >&2
+    exit 1
+  fi
+}
+
+test_home_scope_unknown_project_writes_codex_home() {
+  local dir="$TEST_ROOT/home-scope-unknown"
+  local codex_home="$TEST_ROOT/home-scope-unknown-codex-home"
+  mkdir -p "$dir" "$codex_home"
+
+  run_switch_home_scope "$dir" "$codex_home" apply >/dev/null
+  assert_file_contains "$codex_home/config.toml" 'model_provider = "volcengine-ark"' "home-scope unknown project writes Codex home provider"
+
+  run_switch_home_scope "$dir" "$codex_home" rollback >/dev/null
+  assert_file_missing "$codex_home/config.toml" "home-scope unknown project rollback removes new Codex home config"
 }
 
 test_node_env_rollback() {
@@ -145,6 +189,8 @@ test_status() {
 test_syntax
 test_codex_new_config_rollback
 test_codex_existing_config_rollback
+test_codex_home_scope_rollback
+test_home_scope_unknown_project_writes_codex_home
 test_node_env_rollback
 test_python_env_rollback
 test_dry_run_no_write

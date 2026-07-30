@@ -10,6 +10,7 @@ ARK_MODEL="${ARK_MODEL:-}"
 ARK_BASE_URL="${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
 ARK_UA="${ARK_UA:-codex_exec/0.0.0 (Mac OS; arm64) dumb (codex_exec; 0.0.0)}"
 SCOPE="${SCOPE:-project}"
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 DRY_RUN="false"
 BACKUP_ID=""
 
@@ -30,7 +31,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-STATE_DIR="${PROJECT_DIR}/.ark-switch"
+if [[ "$SCOPE" == "home" ]]; then
+  STATE_DIR="${CODEX_HOME_DIR}/.ark-switch"
+else
+  STATE_DIR="${PROJECT_DIR}/.ark-switch"
+fi
 BACKUP_ROOT="${STATE_DIR}/backups"
 CURRENT_FILE="${STATE_DIR}/current.json"
 
@@ -68,17 +73,23 @@ detect_project_type() {
 
 backup_file() {
   local backup_dir="$1"
-  local rel_path="$2"
+  local path="$2"
   local backup_name="$3"
-  local abs_path="${PROJECT_DIR}/${rel_path}"
+  local abs_path
+
+  if [[ "$path" = /* ]]; then
+    abs_path="$path"
+  else
+    abs_path="${PROJECT_DIR}/${path}"
+  fi
 
   mkdir -p "$backup_dir"
 
   if [[ -f "$abs_path" ]]; then
     cp "$abs_path" "${backup_dir}/${backup_name}"
-    echo "{\"path\":\"${rel_path}\",\"backup\":\"${backup_name}\",\"existed\":true}"
+    echo "{\"path\":\"${path}\",\"backup\":\"${backup_name}\",\"existed\":true}"
   else
-    echo "{\"path\":\"${rel_path}\",\"backup\":\"${backup_name}\",\"existed\":false}"
+    echo "{\"path\":\"${path}\",\"backup\":\"${backup_name}\",\"existed\":false}"
   fi
 }
 
@@ -109,11 +120,14 @@ EOF
 apply_codex_config() {
   local backup_id="$1"
   local backup_dir="$2"
-  local config_rel=".codex/config.toml"
-  local config_abs="${PROJECT_DIR}/${config_rel}"
+  local config_path=".codex/config.toml"
+  local config_abs="${PROJECT_DIR}/${config_path}"
 
-  if [[ "$SCOPE" != "project" ]]; then
-    echo "Only SCOPE=project is supported by this rollback-safe script." >&2
+  if [[ "$SCOPE" == "home" ]]; then
+    config_path="${CODEX_HOME_DIR}/config.toml"
+    config_abs="$config_path"
+  elif [[ "$SCOPE" != "project" ]]; then
+    echo "Unsupported SCOPE=${SCOPE}. Use SCOPE=project or SCOPE=home." >&2
     exit 1
   fi
 
@@ -123,7 +137,7 @@ apply_codex_config() {
   fi
 
   local change
-  change="$(backup_file "$backup_dir" "$config_rel" "codex_config.toml")"
+  change="$(backup_file "$backup_dir" "$config_path" "codex_config.toml")"
 
   mkdir -p "$(dirname "$config_abs")"
 
@@ -207,18 +221,24 @@ apply() {
 
   local changes=()
 
-  case "$project_type" in
-    codex)
-      local change
-      change="$(apply_codex_config "$backup_id" "$backup_dir")"
-      [[ -n "$change" ]] && changes+=("$change")
-      ;;
-    node-openai|python-openai|unknown)
-      local change
-      change="$(apply_env_config "$backup_id" "$backup_dir")"
-      [[ -n "$change" ]] && changes+=("$change")
-      ;;
-  esac
+  if [[ "$SCOPE" == "home" ]]; then
+    local change
+    change="$(apply_codex_config "$backup_id" "$backup_dir")"
+    [[ -n "$change" ]] && changes+=("$change")
+  else
+    case "$project_type" in
+      codex)
+        local change
+        change="$(apply_codex_config "$backup_id" "$backup_dir")"
+        [[ -n "$change" ]] && changes+=("$change")
+        ;;
+      node-openai|python-openai|unknown)
+        local change
+        change="$(apply_env_config "$backup_id" "$backup_dir")"
+        [[ -n "$change" ]] && changes+=("$change")
+        ;;
+    esac
+  fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[dry-run] No files changed."
@@ -277,26 +297,30 @@ rollback() {
   echo "Rolling back backup: ${backup_id}"
 
   grep -o '{"path":"[^"]*","backup":"[^"]*","existed":[^}]*}' "$manifest" | while read -r item; do
-    local rel_path backup existed abs_path backup_path
-    rel_path="$(echo "$item" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
+    local path backup existed abs_path backup_path
+    path="$(echo "$item" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
     backup="$(echo "$item" | sed -n 's/.*"backup":"\([^"]*\)".*/\1/p')"
     existed="$(echo "$item" | sed -n 's/.*"existed":\([^}]*\).*/\1/p')"
 
-    abs_path="${PROJECT_DIR}/${rel_path}"
+    if [[ "$path" = /* ]]; then
+      abs_path="$path"
+    else
+      abs_path="${PROJECT_DIR}/${path}"
+    fi
     backup_path="${backup_dir}/${backup}"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "[dry-run] Would restore $rel_path existed=$existed"
+      echo "[dry-run] Would restore $path existed=$existed"
       continue
     fi
 
     if [[ "$existed" == "true" ]]; then
       mkdir -p "$(dirname "$abs_path")"
       cp "$backup_path" "$abs_path"
-      echo "Restored: $rel_path"
+      echo "Restored: $path"
     else
       rm -f "$abs_path"
-      echo "Removed newly-created file: $rel_path"
+      echo "Removed newly-created file: $path"
     fi
   done
 

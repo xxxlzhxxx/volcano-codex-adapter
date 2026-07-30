@@ -118,6 +118,19 @@ dashboard_url() {
   echo "http://${OBSERVER_HOST}:${OBSERVER_PORT}/"
 }
 
+load_observer_state() {
+  local file
+  local value
+  file="$(state_file)"
+  [[ -f "$file" ]] || return
+
+  value="$(sed -n 's/^OBSERVER_HOST="\([^"]*\)".*/\1/p' "$file" | head -n 1)"
+  [[ -n "$value" ]] && OBSERVER_HOST="$value"
+
+  value="$(sed -n 's/^OBSERVER_PORT="\([^"]*\)".*/\1/p' "$file" | head -n 1)"
+  [[ -n "$value" ]] && OBSERVER_PORT="$value"
+}
+
 wait_for_observer() {
   local health_url="http://${OBSERVER_HOST}:${OBSERVER_PORT}/health"
   local attempts=80
@@ -255,6 +268,7 @@ EOF
 status() {
   parse_args "$@"
   require_work_dir
+  load_observer_state
   local pid
   pid="$(current_observer_pid)"
   echo "Work dir: ${WORK_DIR}"

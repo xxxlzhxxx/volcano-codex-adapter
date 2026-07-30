@@ -168,6 +168,8 @@ pass "observer logs are stored under target work dir"
 
 "$OUTER_SCRIPT" status --work-dir "$WORK_DIR" > "$TEST_ROOT/status.txt"
 grep -q 'Observer: running' "$TEST_ROOT/status.txt" || fail "status did not report observer running"
+grep -q 'Dashboard: http://127.0.0.1:18092/' "$TEST_ROOT/status.txt" || fail "status did not report observer dashboard from state"
+grep -q 'Requests API: http://127.0.0.1:18092/api/requests' "$TEST_ROOT/status.txt" || fail "status did not report observer API from state"
 pass "outer script reports status"
 
 "$OUTER_SCRIPT" rollback --work-dir "$WORK_DIR" >/dev/null

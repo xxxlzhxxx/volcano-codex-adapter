@@ -81,6 +81,98 @@ effective_base_url() {
   fi
 }
 
+rewrite_codex_config() {
+  local config_abs="$1"
+  local backup_id="$2"
+  local provider_base_url="$3"
+  local env_key_line=""
+  local tmp_base="${config_abs}.ark-switch.${backup_id}"
+  local normalized="${tmp_base}.normalized"
+  local cleaned="${tmp_base}.cleaned"
+
+  if [[ "$OBSERVER" != "1" && "$OBSERVER" != "true" ]]; then
+    env_key_line='env_key = "ARK_API_KEY"'
+  fi
+
+  if [[ -f "$config_abs" ]]; then
+    awk -v model="$ARK_MODEL" '
+      BEGIN {
+        before_table = 1
+        saw_model = 0
+        saw_provider = 0
+      }
+      /^\[/ && before_table {
+        if (!saw_model) {
+          print "model = \"" model "\""
+        }
+        if (!saw_provider) {
+          print "model_provider = \"volcengine-ark\""
+        }
+        before_table = 0
+      }
+      before_table && $0 ~ /^model[[:space:]]*=/ {
+        print "model = \"" model "\""
+        saw_model = 1
+        next
+      }
+      before_table && $0 ~ /^model_provider[[:space:]]*=/ {
+        print "model_provider = \"volcengine-ark\""
+        saw_provider = 1
+        next
+      }
+      { print }
+      END {
+        if (before_table) {
+          if (!saw_model) {
+            print "model = \"" model "\""
+          }
+          if (!saw_provider) {
+            print "model_provider = \"volcengine-ark\""
+          }
+        }
+      }
+    ' "$config_abs" > "$normalized"
+  else
+    cat > "$normalized" <<EOF
+model = "${ARK_MODEL}"
+model_provider = "volcengine-ark"
+EOF
+  fi
+
+  awk '
+    /^# >>> ark-switch:/ {
+      skip = 1
+      next
+    }
+    /^# <<< ark-switch:/ {
+      skip = 0
+      next
+    }
+    !skip {
+      print
+    }
+  ' "$normalized" > "$cleaned"
+
+  cat >> "$cleaned" <<EOF
+
+# >>> ark-switch:${backup_id}
+[model_providers.volcengine-ark]
+name = "Volcengine Ark"
+base_url = "${provider_base_url}"
+${env_key_line}
+wire_api = "responses"
+http_headers = { "User-Agent" = "${ARK_UA}" }
+
+[profiles.ark]
+model = "${ARK_MODEL}"
+model_provider = "volcengine-ark"
+# <<< ark-switch:${backup_id}
+EOF
+
+  mv "$cleaned" "$config_abs"
+  rm -f "$normalized"
+}
+
 backup_file() {
   local backup_dir="$1"
   local path="$2"
@@ -144,7 +236,7 @@ apply_codex_config() {
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo "[dry-run] Would append Ark provider config to $config_abs" >&2
+    echo "[dry-run] Would write Ark provider config to $config_abs" >&2
     return
   fi
 
@@ -152,25 +244,7 @@ apply_codex_config() {
   change="$(backup_file "$backup_dir" "$config_path" "codex_config.toml")"
 
   mkdir -p "$(dirname "$config_abs")"
-
-  cat >> "$config_abs" <<EOF
-
-# >>> ark-switch:${backup_id}
-model = "${ARK_MODEL}"
-model_provider = "volcengine-ark"
-
-[model_providers.volcengine-ark]
-name = "Volcengine Ark"
-base_url = "${provider_base_url}"
-env_key = "ARK_API_KEY"
-wire_api = "responses"
-http_headers = { "User-Agent" = "${ARK_UA}" }
-
-[profiles.ark]
-model = "${ARK_MODEL}"
-model_provider = "volcengine-ark"
-# <<< ark-switch:${backup_id}
-EOF
+  rewrite_codex_config "$config_abs" "$backup_id" "$provider_base_url"
 
   echo "$change"
 }

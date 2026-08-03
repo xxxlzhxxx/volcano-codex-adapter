@@ -44,6 +44,18 @@ assert_file_missing() {
   fi
 }
 
+assert_top_level_contains() {
+  local file="$1"
+  local pattern="$2"
+  local message="$3"
+  if awk '/^\[/{exit} {print}' "$file" | grep -q "$pattern"; then
+    pass "$message"
+  else
+    printf 'Expected top-level pattern not found: %s\nFile: %s\n' "$pattern" "$file" >&2
+    exit 1
+  fi
+}
+
 run_switch() {
   local project_dir="$1"
   shift
@@ -117,6 +129,8 @@ test_codex_home_scope_rollback() {
   run_switch_home_scope "$dir" "$codex_home" apply >/dev/null
   assert_file_contains "$codex_home/config.toml" 'model_provider = "volcengine-ark"' "codex home-scope apply writes provider"
   assert_file_contains "$codex_home/config.toml" 'User-Agent' "codex home-scope apply writes user-agent header"
+  assert_top_level_contains "$codex_home/config.toml" 'model = "ep-test"' "codex home-scope writes model at TOML top level"
+  assert_top_level_contains "$codex_home/config.toml" 'model_provider = "volcengine-ark"' "codex home-scope writes provider at TOML top level"
 
   run_switch_home_scope "$dir" "$codex_home" rollback >/dev/null
   if cmp -s "$codex_home/config.toml" <(printf 'model = "gpt-5.1"\nmodel_provider = "openai"\n'); then

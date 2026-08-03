@@ -18,6 +18,9 @@ cleanup() {
   if [[ -d "$TEST_ROOT/work" ]]; then
     "$OUTER_SCRIPT" stop-observer --work-dir "$TEST_ROOT/work" >/dev/null 2>&1 || true
   fi
+  if [[ -d "$TEST_ROOT/global-codex-home" ]]; then
+    CODEX_HOME="$TEST_ROOT/global-codex-home" "$OUTER_SCRIPT" stop-observer --global >/dev/null 2>&1 || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 
@@ -87,6 +90,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if self.headers.get("authorization") != "Bearer test-key":
+            self.send_response(401)
+            self.end_headers()
+            return
         length = int(self.headers.get("content-length") or "0")
         if length:
             self.rfile.read(length)
@@ -138,6 +145,12 @@ mkdir -p "$WORK_DIR"
 wait_for_url "http://127.0.0.1:18092/health" || fail "observer did not start from outer script"
 pass "outer script starts observer for work dir"
 
+curl -fsS "http://127.0.0.1:18092/api/v3/models?client_version=0.146.0" > "$TEST_ROOT/models.json"
+grep -q '"models"' "$TEST_ROOT/models.json" || fail "observer models endpoint did not return Codex ModelsResponse"
+grep -q '"slug": "ep-outer"' "$TEST_ROOT/models.json" || fail "observer models endpoint did not expose configured EP as Codex slug"
+grep -q '"truncation_policy"' "$TEST_ROOT/models.json" || fail "observer models endpoint did not expose required model metadata"
+pass "outer script observer serves Codex models endpoint"
+
 CONFIG_FILE="$WORK_DIR/.volcano-codex/codex-home/config.toml"
 grep -q 'model = "ep-outer"' "$CONFIG_FILE" || fail "outer script did not write target EP"
 grep -q 'base_url = "http://127.0.0.1:18092/api/v3"' "$CONFIG_FILE" || fail "outer script did not write observer base URL"
@@ -150,7 +163,7 @@ pass "outer script records work-dir state"
 
 body='{"model":"ep-outer","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}'
 curl -fsS -N \
-  -H 'Authorization: Bearer test-key' \
+  -H 'Authorization: Bearer wrong-client-key' \
   -H 'Content-Type: application/json' \
   --data-binary "$body" \
   http://127.0.0.1:18092/api/v3/responses \
@@ -178,5 +191,31 @@ if curl -fsS http://127.0.0.1:18092/health >/dev/null 2>&1; then
   fail "rollback did not stop observer"
 fi
 pass "outer script rollback restores config and stops observer"
+
+GLOBAL_CODEX_HOME="$TEST_ROOT/global-codex-home"
+mkdir -p "$GLOBAL_CODEX_HOME"
+
+printf '1\ntest-key\nep-global\nhttp://127.0.0.1:18091/api/v3\n' | \
+  CODEX_HOME="$GLOBAL_CODEX_HOME" "$OUTER_SCRIPT" apply-observed --port 18093 \
+  > "$TEST_ROOT/global_apply.log"
+
+wait_for_url "http://127.0.0.1:18093/health" || fail "observer did not start for global config"
+GLOBAL_CONFIG_FILE="$GLOBAL_CODEX_HOME/config.toml"
+grep -q 'model = "ep-global"' "$GLOBAL_CONFIG_FILE" || fail "global prompt did not write target EP"
+grep -q 'base_url = "http://127.0.0.1:18093/api/v3"' "$GLOBAL_CONFIG_FILE" || fail "global prompt did not write observer base URL"
+grep -q 'TARGET_SCOPE="global"' "$GLOBAL_CODEX_HOME/.volcano-codex/state.env" || fail "global state did not record scope"
+pass "outer script prompts for global Codex config and writes CODEX_HOME"
+
+CODEX_HOME="$GLOBAL_CODEX_HOME" "$OUTER_SCRIPT" status --global > "$TEST_ROOT/global_status.txt"
+grep -q 'Scope: global' "$TEST_ROOT/global_status.txt" || fail "global status did not report scope"
+grep -q "Codex home: $GLOBAL_CODEX_HOME" "$TEST_ROOT/global_status.txt" || fail "global status did not report CODEX_HOME"
+pass "outer script reports global status"
+
+CODEX_HOME="$GLOBAL_CODEX_HOME" "$OUTER_SCRIPT" rollback --global >/dev/null
+[[ ! -f "$GLOBAL_CONFIG_FILE" ]] || fail "global rollback did not remove generated Codex config"
+if curl -fsS http://127.0.0.1:18093/health >/dev/null 2>&1; then
+  fail "global rollback did not stop observer"
+fi
+pass "outer script rollback restores global config and stops observer"
 
 printf '\nAll Volcano Codex outer script tests passed.\n'

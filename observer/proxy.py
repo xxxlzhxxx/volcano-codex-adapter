@@ -35,6 +35,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "public"
 FILTER_REASONING_SUMMARY = os.environ.get("OBSERVER_FILTER_REASONING_SUMMARY") == "1"
 MAX_BODY_BYTES = int(os.environ.get("OBSERVER_MAX_BODY_BYTES", str(25 * 1024 * 1024)))
 REQUESTS_DIR = LOG_DIR / "requests"
+ARK_MODEL = os.environ.get("ARK_MODEL", "volcengine-ark")
 
 
 def now_iso() -> str:
@@ -66,6 +67,52 @@ def parse_json_maybe(value: str | bytes) -> Any | None:
         return json.loads(value)
     except Exception:
         return None
+
+
+def models_payload() -> dict[str, Any]:
+    return {
+        "models": [
+            {
+                "slug": ARK_MODEL,
+                "display_name": ARK_MODEL,
+                "description": "Volcengine Ark model served through volcano-codex observer",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "low"},
+                    {"effort": "medium", "description": "medium"},
+                    {"effort": "high", "description": "high"},
+                ],
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "supported_in_api": True,
+                "priority": 1,
+                "availability_nux": None,
+                "upgrade": None,
+                "base_instructions": "",
+                "supports_reasoning_summary_parameter": True,
+                "default_reasoning_summary": "auto",
+                "support_verbosity": False,
+                "default_verbosity": None,
+                "apply_patch_tool_type": None,
+                "web_search_tool_type": "text",
+                "truncation_policy": {"mode": "bytes", "limit": 10000},
+                "supports_parallel_tool_calls": False,
+                "supports_image_detail_original": False,
+                "context_window": 272000,
+                "max_context_window": 272000,
+                "auto_compact_token_limit": None,
+                "comp_hash": None,
+                "effective_context_window_percent": 95,
+                "experimental_supported_tools": [],
+                "input_modalities": ["text"],
+                "supports_search_tool": False,
+                "use_responses_lite": False,
+                "auto_review_model_override": None,
+                "tool_mode": None,
+                "multi_agent_version": None,
+            }
+        ],
+    }
 
 
 def redact_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -453,6 +500,9 @@ class ObserverHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if clean_path in {"/api/v3/models", "/models"}:
+            self.send_json(200, models_payload())
+            return
         if clean_path == "/api/requests":
             self.send_json(200, {"requests": list_summaries()})
             return
@@ -558,9 +608,11 @@ class ObserverHandler(BaseHTTPRequestHandler):
                     "user-agent", os.environ.get("USER_AGENT", "volcano-codex-observer/0.1")
                 ),
             }
-            auth = self.headers.get("authorization")
-            if not auth and os.environ.get("ARK_API_KEY"):
+            auth = None
+            if os.environ.get("ARK_API_KEY"):
                 auth = f"Bearer {os.environ['ARK_API_KEY']}"
+            else:
+                auth = self.headers.get("authorization")
             if auth:
                 upstream_headers["authorization"] = auth
 

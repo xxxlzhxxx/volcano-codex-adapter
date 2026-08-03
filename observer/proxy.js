@@ -13,6 +13,7 @@ const LOG_DIR = path.resolve(process.env.OBSERVER_LOG_DIR || path.join(process.c
 const STATIC_DIR = path.join(__dirname, 'public');
 const FILTER_REASONING_SUMMARY = process.env.OBSERVER_FILTER_REASONING_SUMMARY === '1';
 const MAX_BODY_BYTES = Number(process.env.OBSERVER_MAX_BODY_BYTES || 25 * 1024 * 1024);
+const ARK_MODEL = process.env.ARK_MODEL || 'volcengine-ark';
 
 const REQUESTS_DIR = path.join(LOG_DIR, 'requests');
 
@@ -36,6 +37,50 @@ function text(res, status, value, contentType = 'text/plain; charset=utf-8') {
     'content-length': Buffer.byteLength(value),
   });
   res.end(value);
+}
+
+function modelsPayload() {
+  return {
+    models: [{
+      slug: ARK_MODEL,
+      display_name: ARK_MODEL,
+      description: 'Volcengine Ark model served through volcano-codex observer',
+      default_reasoning_level: 'medium',
+      supported_reasoning_levels: [
+        { effort: 'low', description: 'low' },
+        { effort: 'medium', description: 'medium' },
+        { effort: 'high', description: 'high' },
+      ],
+      shell_type: 'shell_command',
+      visibility: 'list',
+      supported_in_api: true,
+      priority: 1,
+      availability_nux: null,
+      upgrade: null,
+      base_instructions: '',
+      supports_reasoning_summary_parameter: true,
+      default_reasoning_summary: 'auto',
+      support_verbosity: false,
+      default_verbosity: null,
+      apply_patch_tool_type: null,
+      web_search_tool_type: 'text',
+      truncation_policy: { mode: 'bytes', limit: 10000 },
+      supports_parallel_tool_calls: false,
+      supports_image_detail_original: false,
+      context_window: 272000,
+      max_context_window: 272000,
+      auto_compact_token_limit: null,
+      comp_hash: null,
+      effective_context_window_percent: 95,
+      experimental_supported_tools: [],
+      input_modalities: ['text'],
+      supports_search_tool: false,
+      use_responses_lite: false,
+      auto_review_model_override: null,
+      tool_mode: null,
+      multi_agent_version: null,
+    }],
+  };
 }
 
 function safeFileName(value) {
@@ -272,7 +317,7 @@ async function handleProxy(req, res) {
       'accept': req.headers.accept || 'text/event-stream',
       'user-agent': req.headers['user-agent'] || process.env.USER_AGENT || 'volcano-codex-observer/0.1',
     };
-    const auth = req.headers.authorization || (process.env.ARK_API_KEY ? `Bearer ${process.env.ARK_API_KEY}` : null);
+    const auth = process.env.ARK_API_KEY ? `Bearer ${process.env.ARK_API_KEY}` : req.headers.authorization;
     if (auth) upstreamHeaders.authorization = auth;
 
     const upstream = await fetch(`${UPSTREAM_BASE}/responses`, {
@@ -377,6 +422,11 @@ async function router(req, res) {
       log_dir: LOG_DIR,
       filter_reasoning_summary: FILTER_REASONING_SUMMARY,
     });
+    return;
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/api/v3/models' || url.pathname === '/models')) {
+    json(res, 200, modelsPayload());
     return;
   }
 

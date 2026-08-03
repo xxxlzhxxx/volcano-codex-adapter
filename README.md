@@ -72,6 +72,16 @@ cd /path/to/volcano-codex-adapter
   --model "ep-..."
 ```
 
+Interactive setup prompts for the Codex target, API key, EP/model, and API
+base URL:
+
+```bash
+./volcano_codex.sh apply-observed
+```
+
+Choose `global` to write `${CODEX_HOME:-$HOME/.codex}/config.toml`, or choose a
+specific directory to store an isolated Codex home under that directory.
+
 This starts the Python observer, switches that work directory to the observed
 Volcano provider, and stores all state under:
 
@@ -103,6 +113,13 @@ Check or rollback:
 ```bash
 ./volcano_codex.sh status --work-dir /path/to/project
 ./volcano_codex.sh rollback --work-dir /path/to/project
+```
+
+For global setup, use:
+
+```bash
+./volcano_codex.sh status --global
+./volcano_codex.sh rollback --global
 ```
 
 Start a local model-provider proxy:
